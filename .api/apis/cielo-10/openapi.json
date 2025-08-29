@@ -1,0 +1,654 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Checkout",
+    "version": "unknown"
+  },
+  "servers": [
+    {
+      "url": "https://cieloecommerce.cielo.com.br/api/public/"
+    }
+  ],
+  "components": {
+    "securitySchemes": {}
+  },
+  "security": [
+    {}
+  ],
+  "paths": {
+    "/v1/orders/": {
+      "post": {
+        "summary": "Criar página de pagamento do Checkout Cielo",
+        "description": "Cria a página de pagamento do Checkout.",
+        "operationId": "criar-página-checkout-api",
+        "parameters": [
+          {
+            "name": "MerchantId",
+            "in": "header",
+            "description": "Identificador único da loja fornecido pela Cielo após a afiliação da loja. Formato: 00000000-0000-0000-0000-000000000000",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Content-type",
+            "in": "header",
+            "description": "Tipo do conteúdo da mensagem a ser enviada.",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "default": "application/json"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "properties": {
+                  "OrderNumber": {
+                    "type": "string",
+                    "description": "Número do pedido da loja. <br>Se não for enviado, o Checkout Cielo gerará um número, que será visualizado pelo consumidor.<br> Para fins de conciliação, os caracteres permitidos são apenas a-z, A-Z, 0-9, não permitido caracteres especiais e espaços em branco.<br> Tamanho máximo: 20."
+                  },
+                  "SoftDescriptor": {
+                    "type": "string",
+                    "description": "Descrição a ser apresentada na fatura do cartão de crédito do portador. Tamanho máximo: 13."
+                  },
+                  "Cart": {
+                    "properties": {
+                      "Discount": {
+                        "properties": {
+                          "Type": {
+                            "type": "string",
+                            "description": "**Obrigatório caso pagamento tenha desconto no carrinho.** Tipo do desconto: \"Amount\" ou \"Percent\". Tamanho máximo: 255."
+                          },
+                          "Value": {
+                            "type": "integer",
+                            "description": "**Obrigatório caso pagamento tenha desconto no carrinho.** Valor do desconto. Tamanho máximo: 18.",
+                            "format": "int32"
+                          }
+                        },
+                        "required": [],
+                        "type": "object"
+                      },
+                      "Items": {
+                        "type": "array",
+                        "description": "Informações sobre os itens no carrinho.",
+                        "items": {
+                          "properties": {
+                            "Cart.Items.Name": {
+                              "type": "string",
+                              "description": "Nome do item no carrinho. <br>Exemplo: Pedido ABC. <br>Tamanho máximo: 128"
+                            },
+                            "Cart.Items.Description": {
+                              "type": "string",
+                              "description": "Descrição do item no carrinho. <br>Exemplo: 50 canetas - R$30,00. <br>Tamanho máximo: 256."
+                            },
+                            "Cart.Items.UnitPrice": {
+                              "type": "integer",
+                              "description": "Preço unitário do produto em centavos. <br>Exemplo: R$ 1,00 = 100 <br>Tamanho máximo: 18.",
+                              "format": "int32"
+                            },
+                            "Cart.Items.Quantity": {
+                              "type": "integer",
+                              "description": "Quantidade do item no carrinho. <br>Exemplo: 1. <br>Tamanho máximo: 9.",
+                              "format": "int32"
+                            },
+                            "Cart.Items.Type": {
+                              "type": "string",
+                              "description": "Tipo do item no carrinho. <br>Exemplo: Asset; <br>Digital; <br>Service; <br>Payment<br>Recurrent.<br> Tamanho máximo: 255."
+                            },
+                            "Cart.Items.Sku": {
+                              "type": "string",
+                              "description": "Identificador do produto. <br>Tamanho máximo: 32."
+                            },
+                            "Cart.Items.Weight": {
+                              "type": "integer",
+                              "description": "Peso do produto. <br>Tamanho máximo: 9.",
+                              "format": "int32"
+                            }
+                          },
+                          "required": [
+                            "Cart.Items.Name",
+                            "Cart.Items.UnitPrice",
+                            "Cart.Items.Quantity",
+                            "Cart.Items.Type"
+                          ],
+                          "type": "object"
+                        }
+                      }
+                    },
+                    "required": [],
+                    "type": "object",
+                    "description": "Informações sobre o carrinho. O nó `Cart` deve ser repetido para cada item incluso no carrinho do comprador."
+                  },
+                  "Payment": {
+                    "properties": {
+                      "BoletoDiscount": {
+                        "type": "integer",
+                        "description": "**Obrigatório caso o pagamento por boleto tenha desconto.** Desconto, em porcentagem, para pagamentos a serem realizados com boleto. Tamanho máximo: 3.",
+                        "format": "int32"
+                      },
+                      "RecurrentPayment": {
+                        "properties": {
+                          "Interval": {
+                            "type": "string",
+                            "description": "**Obrigatório caso o pagamento seja recorrente**. Intervalo entre cada transação da recorrência. <br>“Monthly” para mensal; <br>“Bimonthly” para bimestral <br>“Quarterly” para trimestral <br>“SemiAnnual” para semestral<br> “Annual” para anual. <br>Tamanho máximo: 10."
+                          },
+                          "EndDate": {
+                            "type": "string",
+                            "description": "**Obrigatório caso o pagamento seja recorrente**. Data de encerramento da recorrência. Se não enviado, a recorrência se encerra somente se cancelada. Tamanho máximo: 255.",
+                            "format": "date"
+                          }
+                        },
+                        "required": [],
+                        "type": "object"
+                      },
+                      "FirstInstallmentDiscount": {
+                        "type": "integer",
+                        "description": "**Obrigatório caso o pagamento à vista tenha desconto.** Desconto, em porcentagem, para pagamentos à vista no cartão de crédito. Tamanho: 3.",
+                        "format": "int32"
+                      },
+                      "MaxNumberOfInstallments": {
+                        "type": "string",
+                        "description": "**Obrigatório caso o pagamento for parcelado**. Define número máximo de parcelas apresentadas na página de pagamento. Tamanho: 3."
+                      },
+                      "FixedInstallments": {
+                        "type": "integer",
+                        "description": "Número fixo e único de parcelas que o comprador pode selecionar na tela de pagamento, caso a loja deseje especificar uma quantidade de parcelas exata que o portador pode escolher. **Atenção: não envie esse campo se o tipo de produto (type) for igual a “Recurrent”.** Tamanho: até 2 caracteres (1 a 18 parcelas).",
+                        "format": "int32"
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "Customer": {
+                    "properties": {
+                      "Identity": {
+                        "type": "integer",
+                        "description": "Identificação do comprador (CPF ou CNPJ). Se enviado, esse valor já vem preenchido na tela do Checkout Cielo. Não obrigatório na API, mas obrigatório na tela transacional. Tamanho máximo: 14.",
+                        "format": "int32"
+                      },
+                      "FullName": {
+                        "type": "string",
+                        "description": "Nome completo do comprador. Não obrigatório na API, mas obrigatório na tela transacional. Tamanho máximo: 288."
+                      },
+                      "Email": {
+                        "type": "string",
+                        "description": "E-mail do comprador. Se enviado, esse valor já vem preenchido na tela do Checkout Cielo. Não obrigatório na API, mas obrigatório na tela transacional. Tamanho máximo: 64."
+                      },
+                      "Phone": {
+                        "type": "integer",
+                        "description": "Telefone do comprador. Se enviado, esse valor já vem preenchido na tela do Checkout Cielo. Não obrigatório na API, mas obrigatório na tela transacional. Tamanho: 11.",
+                        "format": "int32"
+                      }
+                    },
+                    "required": [],
+                    "type": "object",
+                    "description": "Dados do comprador."
+                  },
+                  "Options": {
+                    "properties": {
+                      "ReturnUrl": {
+                        "type": "string",
+                        "description": "URL fixa definida pela loja que pode ser registrada no backoffice Checkout. Após finalizar o pagamento, o comprador pode ser redirecionado para uma página definida web pela loja. Tamanho: 255."
+                      }
+                    },
+                    "required": [],
+                    "type": "object"
+                  },
+                  "Shipping": {
+                    "properties": {
+                      "Type": {
+                        "type": "string",
+                        "description": "Tipo do frete: <br>Correios; <br>FixedAmount; <br>Free; <br>WithoutShippingPickUp; <br>WithoutShipping. <br> Tamanho máximo: 255."
+                      },
+                      "SourceZipCode": {
+                        "type": "integer",
+                        "description": "CEP de origem do carrinho de compras. Obrigatório caso Shipping.Type seja “Correios”*. Tamanho: 8.",
+                        "format": "int32"
+                      },
+                      "TargetZipCode": {
+                        "type": "integer",
+                        "description": "CEP do endereço de entrega do comprador. Tamanho: 8.",
+                        "format": "int32"
+                      },
+                      "Address": {
+                        "properties": {
+                          "Street": {
+                            "type": "string",
+                            "description": "Rua, avenida, travessa, etc, do endereço de entrega do comprador. Não é obrigatório, mas recomendamos enviar. Tamanho: 256."
+                          },
+                          "Number": {
+                            "type": "string",
+                            "description": "Número do endereço de entrega do comprador. Não é obrigatório, mas recomendamos enviar. Tamanho máximo: 8."
+                          },
+                          "Complement": {
+                            "type": "string",
+                            "description": "Complemento do endereço de entrega do comprador. Não é obrigatório, mas recomendamos enviar. Tamanho máximo: 14."
+                          },
+                          "District": {
+                            "type": "string",
+                            "description": "Bairro do endereço de entrega do comprador. Não é obrigatório, mas recomendamos enviar."
+                          },
+                          "City": {
+                            "type": "string",
+                            "description": "Cidade do endereço de entrega do comprador. Não é obrigatório, mas recomendamos enviar. Tamanho máximo: 64."
+                          },
+                          "State": {
+                            "type": "string",
+                            "description": "Estado (UF) do endereço de entrega do comprador. Não é obrigatório, mas recomendamos enviar. Tamanho máximo: 2."
+                          }
+                        },
+                        "required": [],
+                        "type": "object"
+                      },
+                      "Services": {
+                        "properties": {
+                          "Name": {
+                            "type": "string",
+                            "description": "Nome do serviço de frete. Tamanho máximo: 128."
+                          },
+                          "Price": {
+                            "type": "integer",
+                            "description": "Preço do serviço de frete em centavos. <br>Exemplo: R$ 1,00 = 100.<br> Tamanho máximo: 18.",
+                            "format": "int32"
+                          },
+                          "Deadline": {
+                            "type": "integer",
+                            "description": "Prazo de entrega (em dias). Tamanho máximo: 9.",
+                            "format": "int32"
+                          }
+                        },
+                        "required": [
+                          "Name",
+                          "Price"
+                        ],
+                        "type": "object"
+                      },
+                      "Package": {
+                        "type": "string",
+                        "description": "Tipo de pacote: <br>“Box”: caixa; <br>“Rol”: cilindro ou envelope."
+                      },
+                      "Length": {
+                        "type": "integer",
+                        "description": "Comprimento do pacote.",
+                        "format": "int32"
+                      },
+                      "Height": {
+                        "type": "integer",
+                        "description": "**Obrigatório caso Shipping.Package como “Box”**. Altura do pacote enviado.",
+                        "format": "int32"
+                      },
+                      "Width": {
+                        "type": "integer",
+                        "description": "**Obrigatório caso Shipping.Package seja “Box” ou “Envelope”**. Largura do pacote.",
+                        "format": "int32"
+                      },
+                      "Diameter": {
+                        "type": "integer",
+                        "description": "**Obrigatório caso Shipping.Package como “Rol”**. Diâmetro do pacote.",
+                        "format": "int32"
+                      }
+                    },
+                    "required": [
+                      "Package",
+                      "Length"
+                    ],
+                    "type": "object",
+                    "description": "Informações do endereço de entrega"
+                  }
+                }
+              },
+              "examples": {
+                "Request example": {
+                  "value": {
+                    "OrderNumber": "Pedido01",
+                    "SoftDescriptor": "Nomefantasia",
+                    "Cart": {
+                      "Discount": {
+                        "Type": "Percent",
+                        "Value": "00"
+                      },
+                      "Items": [
+                        {
+                          "Name": "Produto01",
+                          "Description": "ProdutoExemplo01",
+                          "UnitPrice": 100,
+                          "Quantity": 1,
+                          "Type": "Asset",
+                          "Sku": "ABC001",
+                          "Weight": 500
+                        }
+                      ]
+                    },
+                    "Shipping": {
+                      "SourceZipCode": "20020080",
+                      "TargetZipCode": "21911130",
+                      "Type": "FixedAmount",
+                      "Services": [
+                        {
+                          "Name": "Motoboy",
+                          "Price": 1,
+                          "Deadline": 15
+                        },
+                        {
+                          "Name": "UPS Express",
+                          "Price": 1,
+                          "Deadline": 2
+                        }
+                      ],
+                      "Address": {
+                        "Street": "Rua Cambui",
+                        "Number": "92",
+                        "Complement": "Apto 201",
+                        "District": "Freguesia",
+                        "City": "Rio de Janeiro",
+                        "State": "RJ"
+                      }
+                    },
+                    "Customer": {
+                      "Identity": "84261300206",
+                      "FullName": "Test de Test",
+                      "Email": "test@cielo.com.br",
+                      "Phone": "21987654321"
+                    }
+                  }
+                },
+                "Pagamento parcelado": {
+                  "value": {
+                    "OrderNumber": "Pedido0123",
+                    "SoftDescriptor": "Nomefantasia",
+                    "Cart": {
+                      "Items": [
+                        {
+                          "Name": "Produto01",
+                          "Description": "ProdutoExemplo01",
+                          "UnitPrice": 100,
+                          "Quantity": 1,
+                          "Type": "Asset",
+                          "Sku": "ABC001",
+                          "Weight": 500
+                        }
+                      ]
+                    },
+                    "Shipping": {
+                      "SourceZipCode": "20020080",
+                      "TargetZipCode": "21911130",
+                      "Type": "FixedAmount",
+                      "Services": [
+                        {
+                          "Name": "Moto entrega",
+                          "Price": 1000,
+                          "Deadline": 15,
+                          "Carrier": null
+                        },
+                        {
+                          "Name": "Entrega Express",
+                          "Price": 1000,
+                          "Deadline": 2,
+                          "Carrier": null
+                        }
+                      ],
+                      "Address": {
+                        "Street": "Alameda Xingu",
+                        "Number": "512",
+                        "Complement": "21 andar",
+                        "District": "Alphaville",
+                        "City": "Barueri",
+                        "State": "SP"
+                      }
+                    },
+                    "Payment": {
+                      "BoletoDiscount": 15,
+                      "Installments": null,
+                      "MaxNumberOfInstallments": null
+                    },
+                    "Customer": {
+                      "Identity": "84261300206",
+                      "FullName": "Nome Completo",
+                      "Email": "nome@email.com.br",
+                      "Phone": "11988776655"
+                    }
+                  }
+                },
+                "Desconto no carrinho": {
+                  "value": {
+                    "OrderNumber": "Pedido0123",
+                    "SoftDescriptor": "Nomefantasia",
+                    "Cart": {
+                      "Items": [
+                        {
+                          "Name": "Produto01",
+                          "Description": "ProdutoExemplo01",
+                          "UnitPrice": 100,
+                          "Quantity": 1,
+                          "Type": "Asset",
+                          "Sku": "ABC001",
+                          "Weight": 500
+                        }
+                      ]
+                    },
+                    "Shipping": {
+                      "SourceZipCode": "20020080",
+                      "TargetZipCode": "21911130",
+                      "Type": "FixedAmount",
+                      "Services": [
+                        {
+                          "Name": "Moto entrega",
+                          "Price": 1000,
+                          "Deadline": 15,
+                          "Carrier": null
+                        },
+                        {
+                          "Name": "Entrega Express",
+                          "Price": 1000,
+                          "Deadline": 2,
+                          "Carrier": null
+                        }
+                      ],
+                      "Address": {
+                        "Street": "Alameda Xingu",
+                        "Number": "512",
+                        "Complement": "21 andar",
+                        "District": "Alphaville",
+                        "City": "Barueri",
+                        "State": "SP"
+                      }
+                    },
+                    "Discount": {
+                      "Type": "Percent",
+                      "Value": 0
+                    },
+                    "Customer": {
+                      "Identity": "84261300206",
+                      "FullName": "Nome Completo",
+                      "Email": "nome@email.com.br",
+                      "Phone": "11988776655"
+                    }
+                  }
+                },
+                "Desconto para boleto": {
+                  "value": {
+                    "OrderNumber": "Pedido0123",
+                    "SoftDescriptor": "Nomefantasia",
+                    "Cart": {
+                      "Items": [
+                        {
+                          "Name": "Produto01",
+                          "Description": "ProdutoExemplo01",
+                          "UnitPrice": 100,
+                          "Quantity": 1,
+                          "Type": "Asset",
+                          "Sku": "ABC001",
+                          "Weight": 500
+                        }
+                      ]
+                    },
+                    "Shipping": {
+                      "SourceZipCode": "20020080",
+                      "TargetZipCode": "21911130",
+                      "Type": "FixedAmount",
+                      "Services": [
+                        {
+                          "Name": "Moto entrega",
+                          "Price": 1000,
+                          "Deadline": 15,
+                          "Carrier": null
+                        },
+                        {
+                          "Name": "Entrega Express",
+                          "Price": 1000,
+                          "Deadline": 2,
+                          "Carrier": null
+                        }
+                      ],
+                      "Address": {
+                        "Street": "Alameda Xingu",
+                        "Number": "512",
+                        "Complement": "21 andar",
+                        "District": "Alphaville",
+                        "City": "Barueri",
+                        "State": "SP"
+                      }
+                    },
+                    "Payment": {
+                      "BoletoDiscount": 15
+                    },
+                    "Customer": {
+                      "Identity": "84261300206",
+                      "FullName": "Nome Completo",
+                      "Email": "nome@email.com.br",
+                      "Phone": "11988776655"
+                    }
+                  }
+                },
+                "Desconto para pagamento à vista": {
+                  "value": {
+                    "OrderNumber": "Pedido0123",
+                    "SoftDescriptor": "Nomefantasia",
+                    "Cart": {
+                      "Items": [
+                        {
+                          "Name": "Produto01",
+                          "Description": "ProdutoExemplo01",
+                          "UnitPrice": 100,
+                          "Quantity": 1,
+                          "Type": "Asset",
+                          "Sku": "ABC001",
+                          "Weight": 500
+                        }
+                      ]
+                    },
+                    "Shipping": {
+                      "SourceZipCode": "20020080",
+                      "TargetZipCode": "21911130",
+                      "Type": "FixedAmount",
+                      "Services": [
+                        {
+                          "Name": "Moto entrega",
+                          "Price": 1000,
+                          "Deadline": 15,
+                          "Carrier": null
+                        },
+                        {
+                          "Name": "Entrega Express",
+                          "Price": 1000,
+                          "Deadline": 2,
+                          "Carrier": null
+                        }
+                      ],
+                      "Address": {
+                        "Street": "Alameda Xingu",
+                        "Number": "512",
+                        "Complement": "21 andar",
+                        "District": "Alphaville",
+                        "City": "Barueri",
+                        "State": "SP"
+                      }
+                    },
+                    "Payment": {
+                      "FirstInstallmentDiscount": 10
+                    },
+                    "Customer": {
+                      "Identity": "84261300206",
+                      "FullName": "Nome Completo",
+                      "Email": "nome@email.com.br",
+                      "Phone": "11988776655"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "200",
+            "content": {
+              "application/json": {
+                "examples": {
+                  "Result": {
+                    "value": "{\n  \"Settings\": {\n    \"CheckoutUrl\": \"https://cieloecommerce.cielo.com.br/transacional/order/index?id=123\",\n    \"Profile\": \"CheckoutCielo\",\n    \"Version\": 1\n  }\n}"
+                  }
+                },
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "Settings": {
+                      "type": "object",
+                      "properties": {
+                        "CheckoutUrl": {
+                          "type": "string",
+                          "example": "https://cieloecommerce.cielo.com.br/transacional/order/index?id=123"
+                        },
+                        "Profile": {
+                          "type": "string",
+                          "example": "CheckoutCielo"
+                        },
+                        "Version": {
+                          "type": "integer",
+                          "example": 1,
+                          "default": 0
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "400",
+            "content": {
+              "application/json": {
+                "examples": {
+                  "Result": {
+                    "value": "{\n  \"message\": \"An error has occurred.\"\n}"
+                  }
+                },
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": {
+                      "type": "string",
+                      "example": "An error has occurred."
+                    }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "deprecated": false,
+        "security": []
+      }
+    }
+  },
+  "x-readme": {
+    "headers": []
+  },
+  "x-readme-fauxas": true
+}
