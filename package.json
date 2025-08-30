@@ -2,6 +2,7 @@
   "name": "cielo-back",
   "version": "1.0.0",
   "description": "",
+  "type": "module",
   "main": "checkout.js",
   "scripts": {
     "start": "node index.js",
