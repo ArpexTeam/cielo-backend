@@ -1,5 +1,0 @@
-    {
-          "functions": {
-            "api/**/*.js": { "runtime": "node@20.x" }
-          }
-}
