@@ -1,50 +1,16 @@
 // api/checkout.js
 import axios from "axios";
 
-// ---- env
-const MERCHANT_ID   = process.env.CIELO_MERCHANT_ID;
-const BASE          = process.env.CIELO_BASE || "https://cieloecommerce.cielo.com.br";
-const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || "*";
+const MERCHANT_ID      = process.env.CIELO_MERCHANT_ID;
+const BASE             = process.env.CIELO_BASE || "https://cieloecommerce.cielo.com.br";
+const ALLOWED_ORIGIN   = process.env.ALLOWED_ORIGIN || "*";
+// NOVO: URLs
+const NOTIFICATION_URL = process.env.CIELO_NOTIFICATION_URL; // ex.: https://seu-backend.vercel.app/api/cielo-webhook
+const RETURN_URL_BASE  = process.env.RETURN_URL_BASE;        // ex.: https://seu-front.vercel.app
 
-// ---- utils
-const toCents = (v) => {
-  if (v == null) return 0;
-  if (typeof v === "string") {
-    const s = v.replace(/\./g, "").replace(",", ".");
-    const n = parseFloat(s);
-    return Number.isFinite(n) ? Math.round(n * 100) : 0;
-  }
-  if (typeof v === "number") {
-    return Number.isInteger(v) && v >= 100 ? v : Math.round(v * 100);
-  }
-  return 0;
-};
+// ... (utils inalterados)
 
-const ensureOrderNumber = (v) =>
-  (typeof v === "string" && v.trim().length >= 1 ? v : "PED" + Date.now()).replace(/\s+/g, "");
-
-const ensureSoftDescriptor = (v) =>
-  (v || "Nomefantasia").replace(/[^a-zA-Z0-9]/g, "").slice(0, 20) || "Nomefantasia";
-
-function mapFrontItemsToCielo(items = []) {
-  return items.map((p) => ({
-    Name: p?.nome ?? p?.name ?? "Produto",
-    Description: p?.descricao ?? p?.description ?? "Item",
-    UnitPrice: toCents(p?.preco ?? p?.price ?? 0),
-    Quantity: Number(p?.quantidade ?? p?.quantity ?? 1) || 1,
-    Type: p?.type ?? "Asset",
-    Sku: String(p?.id ?? p?.sku ?? "SKU"),
-    Weight: Number(p?.peso ?? p?.weight ?? 0),
-  }));
-}
-
-function looksLikeCieloPayload(body) {
-  return !!(body?.Cart?.Items && Array.isArray(body.Cart.Items) && body.Cart.Items[0]?.Name);
-}
-
-// ---- handler
 export default async function handler(req, res) {
-  // CORS
   res.setHeader("Access-Control-Allow-Origin", ALLOWED_ORIGIN);
   res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
@@ -56,8 +22,10 @@ export default async function handler(req, res) {
     if (!MERCHANT_ID) {
       return res.status(500).json({ error: "CIELO_MERCHANT_ID não configurado" });
     }
+    if (!NOTIFICATION_URL || !RETURN_URL_BASE) {
+      return res.status(500).json({ error: "CIELO_NOTIFICATION_URL/RETURN_URL_BASE não configurados" });
+    }
 
-    // ---- monta payload
     let payload;
     if (looksLikeCieloPayload(req.body)) {
       const b = req.body;
@@ -88,12 +56,18 @@ export default async function handler(req, res) {
           Address: b.Shipping?.Address,
         },
         Customer: b.Customer,
+        // NOVO:
+        Settings: {
+          NotificationUrl: NOTIFICATION_URL, // a Cielo envia POST aqui
+          ReturnUrl: `${RETURN_URL_BASE}/checkout/retorno?order=${encodeURIComponent(ensureOrderNumber(b.OrderNumber))}`,
+        },
       };
     } else {
       const { itens, items, shipping, customer, orderNumber, softDescriptor, cart } = req.body;
       const frontItems = cart?.items || items || itens || [];
+      const ord = ensureOrderNumber(orderNumber);
       payload = {
-        OrderNumber: ensureOrderNumber(orderNumber),
+        OrderNumber: ord,
         SoftDescriptor: ensureSoftDescriptor(softDescriptor),
         Cart: {
           Discount: { Type: "Percent", Value: 0 },
@@ -108,6 +82,11 @@ export default async function handler(req, res) {
           Address: shipping?.Address,
         },
         Customer: customer || undefined,
+        // NOVO:
+        Settings: {
+          NotificationUrl: NOTIFICATION_URL,
+          ReturnUrl: `${RETURN_URL_BASE}/checkout/retorno?order=${encodeURIComponent(ord)}`,
+        },
       };
     }
 
@@ -115,7 +94,6 @@ export default async function handler(req, res) {
       return res.status(400).json({ error: "UnitPrice inválido (centavos >= 1)." });
     }
 
-    // ---- chama Cielo
     const response = await axios.request({
       method: "POST",
       url: `${BASE}/api/public/v1/orders`,
@@ -132,15 +110,13 @@ export default async function handler(req, res) {
 
     let body = response.data;
     if (typeof body === "string" && body.length) {
-      try { body = JSON.parse(body); } catch { /* mantém string */ }
+      try { body = JSON.parse(body); } catch {}
     }
-
     if (response.status === 200 || response.status === 201) {
       return typeof body === "string"
         ? res.status(response.status).type("application/json").send(body)
         : res.status(response.status).json(body);
     }
-
     return res.status(response.status).json(
       typeof body === "object" ? body : { error: "Cielo error", raw: body }
     );
