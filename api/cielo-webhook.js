@@ -126,6 +126,41 @@ function normalizePayment(p) {
   return { ps: Number.isFinite(ps) ? ps : null, text: t, isPaid, reason };
 }
 
+// YYYY-MM-DD em São Paulo (opcional: útil p/ relatórios/filtros rápidos)
+function dateKeySP(d = new Date()) {
+  return new Intl.DateTimeFormat("en-CA", {
+    timeZone: "America/Sao_Paulo",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).format(d);
+}
+
+function mapItensToPedido(itens) {
+  return (Array.isArray(itens) ? itens : []).map((it) => {
+    const precoNum = Number(it?.precoSelecionado ?? it?.preco ?? it?.Price ?? it?.price ?? 0);
+    const unitPriceCents = Number(it?.UnitPrice ?? 0);
+    const preco = precoNum > 0 ? precoNum : (unitPriceCents > 0 ? Math.round(unitPriceCents) / 100 : 0);
+
+    return {
+      id: String(it?.id ?? it?.Id ?? it?.Sku ?? it?.sku ?? ""),
+      nome: it?.nome ?? it?.Name ?? "Item",
+      observacao: it?.observacao ?? it?.Observacao ?? it?.obs ?? "",
+      preco,                                            // em reais
+      quantidade: Number(it?.quantidade ?? it?.quantity ?? 1),
+      tamanho: it?.tamanho ?? it?.size ?? "pequeno",
+      garnicoes: it?.garnicoes ?? it?.extras ?? it?.adicionais ?? it?.opcionais ?? [],
+    };
+  });
+}
+
+function countItens(itens) {
+  return (Array.isArray(itens) ? itens : []).reduce((acc, it) => {
+    const q = Number(it?.quantidade ?? it?.quantity ?? 1);
+    return acc + (Number.isFinite(q) ? q : 0);
+  }, 0);
+}
+
 /* ---------------- Handler ---------------- */
 export default async function handler(req, res) {
   const t0 = Date.now();
@@ -163,7 +198,6 @@ export default async function handler(req, res) {
 
     if (!orderNumber) {
       await logToFirestore({ ...baseLog, stage: "no-order-number" });
-      jlog({ tag: "webhook", stage: "no-order-number", vercelId });
       return res.status(200).json({ ok: true, ignored: true, reason: "no-order-number" });
     }
 
@@ -193,83 +227,89 @@ export default async function handler(req, res) {
 
     // 1) PENDENTE/AUTORIZADO
     if (ps === 1) {
-      if (intentRef) {
-        await intentRef.set({ status: "pendente" }, { merge: true });
-      }
+      if (intentRef) await intentRef.set({ status: "pendente" }, { merge: true });
       await logToFirestore({ ...baseLog, stage: "pending-authorized" });
       jlog({ tag: "webhook", stage: "pending-authorized", orderNumber, ps, tookMs: Date.now() - t0 });
-      // Não cria pedido ainda; aguardamos novo webhook com ps=2
       return res.status(200).json({ ok: true, processed: true, approved: false, pending: true });
     }
 
     // 2) NÃO APROVADO
     if (ps === 3 || ps === 4 || ps === 5) {
-      if (intentRef) {
-        await intentRef.set({ status: "nao_aprovado" }, { merge: true });
-      }
+      if (intentRef) await intentRef.set({ status: "nao_aprovado" }, { merge: true });
       await logToFirestore({ ...baseLog, stage: "not-approved" });
       jlog({ tag: "webhook", stage: "not-approved", orderNumber, ps, tookMs: Date.now() - t0 });
       return res.status(200).json({ ok: true, processed: true, approved: false });
     }
 
-    // 3) APROVADO (ps === 2) -> cria/atualiza pedido
+    // 3) APROVADO (ps === 2) -> cria/atualiza pedido no formato da sua tela
     if (ps === 2 || norm.isPaid) {
-      // Se por alguma razão ps vier null mas texto indicar "paid", seguimos
-      // (norm.isPaid cobre o caso textual)
-      const itens = Array.isArray(intentData?.itens) ? intentData.itens : [];
+      const origItens = Array.isArray(intentData?.itens) ? intentData.itens : [];
+      const itens = mapItensToPedido(origItens);
       const total = Number(intentData?.total ?? 0);
+      const itensCount = countItens(itens);
 
-      if (!intentRef) {
-        // Pago mas sem intent: registra e sai
-        await logToFirestore({ ...baseLog, stage: "paid-without-intent" });
-        await db.collection("webhookOrphans").add({
-          createdAt: FieldValue.serverTimestamp(),
-          orderNumber,
-          payload: parsed,
-        });
-        return res.status(200).json({ ok: true, processed: true, approved: true, pendingIntent: true });
-      }
+      const orderNumStr = String(orderNumber);
 
-      const pedidosSnap = await db
-        .collection("pedidos")
-        .where("pagamento.orderNumber", "==", orderNumber)
-        .limit(1)
-        .get();
+      // nome/telefone se você guardou no intent (opcional)
+      const clienteNome = intentData?.nome || intentData?.clienteNome || "";
+      const clienteTelefone = intentData?.telefone || intentData?.clienteTelefone || "";
 
       const pagamentoData = {
         provedor: "online",
         gateway: "cielo",
-        orderNumber,
+        orderNumber: orderNumStr,
+        status: "aprovado",                  // igual ao “No caixa”
+        paymentStatus: 2,
         raw: parsed,
         lastNotification: FieldValue.serverTimestamp(),
       };
 
+      const basePedido = {
+        orderNumber: orderNumStr,            // top-level p/ busca
+        dateKeySP: dateKeySP(),              // opcional p/ relatórios de HOJE
+        tipoServico: intentData?.tipoServico || "Online",
+        status: "aprovado",
+        total,
+        itens,
+        itensCount,
+        nome: clienteNome,
+        telefone: clienteTelefone,
+        pagamento: pagamentoData,
+        updatedAt: FieldValue.serverTimestamp(),
+      };
+
+      const pedidosSnap = await db
+        .collection("pedidos")
+        .where("pagamento.orderNumber", "==", orderNumStr)
+        .limit(1)
+        .get();
+
       if (pedidosSnap.empty) {
         await db.collection("pedidos").add({
-          createdAt: FieldValue.serverTimestamp(),
-          itens,
-          total,
-          status: "aprovado",
-          tipoServico: "Online",
-          pagamento: pagamentoData,
+          ...basePedido,
+          createdAt: FieldValue.serverTimestamp(), // ESSENCIAL p/ cair no filtro de HOJE
         });
-        await logToFirestore({ ...baseLog, stage: "pedido-created" });
-        jlog({ tag: "webhook", stage: "pedido-created", orderNumber, tookMs: Date.now() - t0 });
+        await logToFirestore({ ...baseLog, stage: "pedido-created", wrote: { orderNumber: orderNumStr } });
+        jlog({ tag: "webhook", stage: "pedido-created", orderNumber: orderNumStr, tookMs: Date.now() - t0 });
       } else {
-        await pedidosSnap.docs[0].ref.set(
-          { status: "aprovado", pagamento: pagamentoData },
+        const ref = pedidosSnap.docs[0].ref;
+        await ref.set(
+          {
+            ...basePedido,
+            createdAt: pedidosSnap.docs[0].get("createdAt") || FieldValue.serverTimestamp(),
+          },
           { merge: true }
         );
-        await logToFirestore({ ...baseLog, stage: "pedido-updated" });
-        jlog({ tag: "webhook", stage: "pedido-updated", orderNumber, tookMs: Date.now() - t0 });
+        await logToFirestore({ ...baseLog, stage: "pedido-updated", wrote: { orderNumber: orderNumStr } });
+        jlog({ tag: "webhook", stage: "pedido-updated", orderNumber: orderNumStr, tookMs: Date.now() - t0 });
       }
 
-      await intentRef.set({ status: "aprovado" }, { merge: true });
+      if (intentRef) await intentRef.set({ status: "aprovado" }, { merge: true });
 
       return res.status(200).json({ ok: true, processed: true, approved: true });
     }
 
-    // 4) Status desconhecido: apenas registra e não cria pedido
+    // 4) Status desconhecido
     await logToFirestore({ ...baseLog, stage: "unknown-status" });
     jlog({ tag: "webhook", stage: "unknown-status", orderNumber, norm, tookMs: Date.now() - t0 });
     return res.status(200).json({ ok: true, processed: false, approved: false });
