@@ -118,7 +118,6 @@ function normalizePayment(p) {
     else if (ps === 4) { isPaid = false; reason = "expirado"; }
     else if (ps === 5) { isPaid = false; reason = "cancelado"; }
   } else {
-    // fallback por texto, se por algum motivo não vier ps
     if (textPaid) { isPaid = true; reason = `text:${t}`; }
     else if (textAuth) { isPaid = false; reason = `text:${t}`; }
   }
@@ -126,7 +125,7 @@ function normalizePayment(p) {
   return { ps: Number.isFinite(ps) ? ps : null, text: t, isPaid, reason };
 }
 
-// YYYY-MM-DD em São Paulo (opcional: útil p/ relatórios/filtros rápidos)
+// YYYY-MM-DD em São Paulo
 function dateKeySP(d = new Date()) {
   return new Intl.DateTimeFormat("en-CA", {
     timeZone: "America/Sao_Paulo",
@@ -146,7 +145,7 @@ function mapItensToPedido(itens) {
       id: String(it?.id ?? it?.Id ?? it?.Sku ?? it?.sku ?? ""),
       nome: it?.nome ?? it?.Name ?? "Item",
       observacao: it?.observacao ?? it?.Observacao ?? it?.obs ?? "",
-      preco,                                            // em reais
+      preco,
       quantidade: Number(it?.quantidade ?? it?.quantity ?? 1),
       tamanho: it?.tamanho ?? it?.size ?? "pequeno",
       garnicoes: it?.garnicoes ?? it?.extras ?? it?.adicionais ?? it?.opcionais ?? [],
@@ -159,6 +158,18 @@ function countItens(itens) {
     const q = Number(it?.quantidade ?? it?.quantity ?? 1);
     return acc + (Number.isFinite(q) ? q : 0);
   }, 0);
+}
+
+// verifica se um documento de "pedidos" é de HOJE (SP)
+function isDocFromToday(docSnap) {
+  const todayKey = dateKeySP();
+  const docKey = docSnap.get("dateKeySP");
+  if (docKey) return String(docKey) === todayKey;
+
+  const createdAt = docSnap.get("createdAt");
+  if (!createdAt || typeof createdAt.toDate !== "function") return false;
+  const createdKey = dateKeySP(createdAt.toDate());
+  return createdKey === todayKey;
 }
 
 /* ---------------- Handler ---------------- */
@@ -190,7 +201,7 @@ export default async function handler(req, res) {
       isPaid: !!norm.isPaid,
       reason: norm.reason,
       rawLen: raw ? raw.length : null,
-      parsedSample: JSON.stringify(parsed).slice(0, 4000), // evita estourar doc
+      parsedSample: JSON.stringify(parsed).slice(0, 4000),
     };
 
     await logToFirestore({ ...baseLog, stage: "received" });
@@ -210,7 +221,6 @@ export default async function handler(req, res) {
     const intentRef = intentsSnap.empty ? null : intentsSnap.docs[0].ref;
     const intentData = intentsSnap.empty ? {} : intentsSnap.docs[0].data();
 
-    // Atualiza trilha de notificação no intent
     if (intentRef) {
       await intentRef.set({
         lastNotification: FieldValue.serverTimestamp(),
@@ -222,26 +232,21 @@ export default async function handler(req, res) {
       }, { merge: true });
     }
 
-    // --- DECISÃO DE STATUS ---
-    const ps = norm.ps; // 1 pendente, 2 pago, 3 negado, 4 expirado, 5 cancelado
+    const ps = norm.ps;
 
-    // 1) PENDENTE/AUTORIZADO
     if (ps === 1) {
       if (intentRef) await intentRef.set({ status: "pendente" }, { merge: true });
       await logToFirestore({ ...baseLog, stage: "pending-authorized" });
-      jlog({ tag: "webhook", stage: "pending-authorized", orderNumber, ps, tookMs: Date.now() - t0 });
       return res.status(200).json({ ok: true, processed: true, approved: false, pending: true });
     }
 
-    // 2) NÃO APROVADO
     if (ps === 3 || ps === 4 || ps === 5) {
       if (intentRef) await intentRef.set({ status: "nao_aprovado" }, { merge: true });
       await logToFirestore({ ...baseLog, stage: "not-approved" });
-      jlog({ tag: "webhook", stage: "not-approved", orderNumber, ps, tookMs: Date.now() - t0 });
       return res.status(200).json({ ok: true, processed: true, approved: false });
     }
 
-    // 3) APROVADO (ps === 2) -> cria/atualiza pedido no formato da sua tela
+    // ====== APROVADO (ps=2) ======
     if (ps === 2 || norm.isPaid) {
       const origItens = Array.isArray(intentData?.itens) ? intentData.itens : [];
       const itens = mapItensToPedido(origItens);
@@ -249,8 +254,6 @@ export default async function handler(req, res) {
       const itensCount = countItens(itens);
 
       const orderNumStr = String(orderNumber);
-
-      // nome/telefone se você guardou no intent (opcional)
       const clienteNome = intentData?.nome || intentData?.clienteNome || "";
       const clienteTelefone = intentData?.telefone || intentData?.clienteTelefone || "";
 
@@ -258,15 +261,15 @@ export default async function handler(req, res) {
         provedor: "online",
         gateway: "cielo",
         orderNumber: orderNumStr,
-        status: "aprovado",                  // igual ao “No caixa”
+        status: "aprovado",
         paymentStatus: 2,
         raw: parsed,
         lastNotification: FieldValue.serverTimestamp(),
       };
 
       const basePedido = {
-        orderNumber: orderNumStr,            // top-level p/ busca
-        dateKeySP: dateKeySP(),              // opcional p/ relatórios de HOJE
+        orderNumber: orderNumStr,
+        dateKeySP: dateKeySP(),
         tipoServico: intentData?.tipoServico || "Online",
         status: "aprovado",
         total,
@@ -278,29 +281,34 @@ export default async function handler(req, res) {
         updatedAt: FieldValue.serverTimestamp(),
       };
 
-      const pedidosSnap = await db
+      // ⚠️ Procura por mesmo orderNumber, MAS só considera se for de HOJE.
+      const possiveis = await db
         .collection("pedidos")
         .where("pagamento.orderNumber", "==", orderNumStr)
-        .limit(1)
+        .limit(5)
         .get();
 
-      if (pedidosSnap.empty) {
+      let docHoje = null;
+      possiveis.forEach((d) => {
+        if (!docHoje && isDocFromToday(d)) docHoje = d;
+      });
+
+      if (!docHoje) {
         await db.collection("pedidos").add({
           ...basePedido,
-          createdAt: FieldValue.serverTimestamp(), // ESSENCIAL p/ cair no filtro de HOJE
+          createdAt: FieldValue.serverTimestamp(), // entra no filtro da sua tela
         });
         await logToFirestore({ ...baseLog, stage: "pedido-created", wrote: { orderNumber: orderNumStr } });
         jlog({ tag: "webhook", stage: "pedido-created", orderNumber: orderNumStr, tookMs: Date.now() - t0 });
       } else {
-        const ref = pedidosSnap.docs[0].ref;
-        await ref.set(
+        await docHoje.ref.set(
           {
             ...basePedido,
-            createdAt: pedidosSnap.docs[0].get("createdAt") || FieldValue.serverTimestamp(),
+            createdAt: docHoje.get("createdAt") || FieldValue.serverTimestamp(),
           },
           { merge: true }
         );
-        await logToFirestore({ ...baseLog, stage: "pedido-updated", wrote: { orderNumber: orderNumStr } });
+        await logToFirestore({ ...baseLog, stage: "pedido-updated", wrote: { orderNumber: orderNumStr, docId: docHoje.id } });
         jlog({ tag: "webhook", stage: "pedido-updated", orderNumber: orderNumStr, tookMs: Date.now() - t0 });
       }
 
@@ -309,7 +317,6 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, processed: true, approved: true });
     }
 
-    // 4) Status desconhecido
     await logToFirestore({ ...baseLog, stage: "unknown-status" });
     jlog({ tag: "webhook", stage: "unknown-status", orderNumber, norm, tookMs: Date.now() - t0 });
     return res.status(200).json({ ok: true, processed: false, approved: false });
@@ -321,7 +328,6 @@ export default async function handler(req, res) {
       stage: "exception",
       error: e?.message || String(e),
     });
-    // Sempre 200 para não gerar retentativas agressivas
     return res.status(200).json({ ok: false, error: e?.message || String(e) });
   }
 }
