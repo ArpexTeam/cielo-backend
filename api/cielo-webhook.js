@@ -40,36 +40,32 @@ async function readRawBody(req) {
 }
 
 async function parseBody(req) {
-  // Tente usar req.body (Vercel já parseia JSON/URL-encoded na maioria dos casos)
+  // Tente usar req.body (Vercel costuma parsear JSON/URL-encoded)
   let b = req.body;
 
-  // Se vier vazio/indefinido, leia o raw e tente parsear
   if (b == null || b === "") {
     const raw = await readRawBody(req);
     if (!raw) return {};
     try {
       return JSON.parse(raw);
-    } catch (_) {
-      // tenta form-encoded
+    } catch {
       return parseQS(raw);
     }
   }
 
-  // Se for string, tente JSON e depois form-encoded
   if (typeof b === "string") {
     try {
       return JSON.parse(b);
-    } catch (_) {
+    } catch {
       return parseQS(b);
     }
   }
 
-  // Já é objeto
   return b;
 }
 
 function getOrderNumber(payload) {
-  // Cobre variações mais comuns que já vimos no painel e no webhook
+  // Campos mais usuais no Checkout Cielo
   const cand =
     payload?.order_number ??
     payload?.OrderNumber ??
@@ -83,27 +79,26 @@ function getOrderNumber(payload) {
 }
 
 function isPaidStatus(payload) {
-  // às vezes vem string textual
-  const s = String(payload?.Status ?? payload?.status ?? "").toLowerCase();
-  if (/(paid|aprov|confirm|captur|authorized|autorizado)/i.test(s)) return true;
+  // Textual (raríssimo no Checkout, mas deixo robusto)
+  const stText = String(payload?.Status ?? payload?.status ?? "").toLowerCase();
+  if (/^(paid|pago|captur)/i.test(stText)) return true;
 
-  // Checkout Cielo costuma mandar "payment_status" = "1" (string)
-  const ps = Number(
+  // Checkout Cielo manda form-data com payment_status = "1|2|3|4|5"
+  // 1=Pendente, 2=Pago, 3=Negado, 4=Expirado, 5=Cancelado
+  // Só 2 é aprovado.
+  const psRaw =
     payload?.payment_status ??
-      payload?.PaymentStatus ??
-      payload?.Payment?.Status ??
-      payload?.payment?.status ??
-      -1
-  );
+    payload?.PaymentStatus ??
+    payload?.Payment?.Status ??
+    payload?.payment?.status;
 
-  // Considere 1/2/3 como estados positivos (ajuste se necessário para sua conta)
-  return [1, 2, 3].includes(ps);
+  const ps = Number(Array.isArray(psRaw) ? psRaw[0] : psRaw);
+  return ps === 2;
 }
 
 /* ---------------- Handler ---------------- */
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    // Webhook é server-to-server; 405 não ajuda a Cielo.
     return res.status(200).json({ ok: true, ignored: true, reason: "not-post" });
   }
 
@@ -126,37 +121,49 @@ export default async function handler(req, res) {
     const intentRef = intentsSnap.empty ? null : intentsSnap.docs[0].ref;
     const intentData = intentsSnap.empty ? {} : intentsSnap.docs[0].data();
 
-    if (!isPaidStatus(payload)) {
-      if (intentRef) {
-        await intentRef.set(
-          {
-            status: "nao_aprovado",
-            lastNotification: FieldValue.serverTimestamp(),
-            raw: payload,
-          },
-          { merge: true }
-        );
-      }
-      console.log(`[webhook] Pedido ${orderNumber} NÃO aprovado.`);
-      return res.status(200).json({ ok: true, processed: true, approved: false });
-    }
-
-    // Aprovado → cria/atualiza "pedidos"
-    const itens = Array.isArray(intentData?.itens) ? intentData.itens : [];
-    const total = Number(intentData?.total ?? 0);
-
-    const pedidosSnap = await db
-      .collection("pedidos")
-      .where("pagamento.orderNumber", "==", orderNumber)
-      .limit(1)
-      .get();
-
     const pagamentoData = {
       provedor: "online",
       gateway: "cielo",
       orderNumber,
       raw: payload,
+      lastNotification: FieldValue.serverTimestamp(),
     };
+
+    // NÃO APROVADO (pendente/negado/expirado/cancelado)
+    if (!isPaidStatus(payload)) {
+      if (intentRef) {
+        await intentRef.set(
+          { status: "nao_aprovado", ...pagamentoData },
+          { merge: true }
+        );
+      }
+      console.log(`[webhook] Pedido ${orderNumber} não aprovado (status != 2).`);
+      return res.status(200).json({ ok: true, processed: true, approved: false });
+    }
+
+    // APROVADO
+    const itens = Array.isArray(intentData?.itens) ? intentData.itens : [];
+    const total = Number(intentData?.total ?? 0);
+
+    // Se ainda não houver intent (raro por corrida), não crie pedido vazio.
+    // Em vez disso, marque um "orphan" para análise e deixe a Cielo re-notificar.
+    if (!intentRef) {
+      await db.collection("webhookOrphans").add({
+        createdAt: FieldValue.serverTimestamp(),
+        reason: "intent_not_found",
+        orderNumber,
+        payload,
+      });
+      console.warn(`[webhook] Aprovado mas sem intent: ${orderNumber}. Registrado em webhookOrphans.`);
+      return res.status(200).json({ ok: true, processed: true, approved: true, pendingIntent: true });
+    }
+
+    // Idempotência por orderNumber
+    const pedidosSnap = await db
+      .collection("pedidos")
+      .where("pagamento.orderNumber", "==", orderNumber)
+      .limit(1)
+      .get();
 
     if (pedidosSnap.empty) {
       await db.collection("pedidos").add({
@@ -176,17 +183,12 @@ export default async function handler(req, res) {
       console.log(`[webhook] Atualizado pedido aprovado para ${orderNumber}.`);
     }
 
-    if (intentRef) {
-      await intentRef.set(
-        { status: "aprovado", lastNotification: FieldValue.serverTimestamp(), raw: payload },
-        { merge: true }
-      );
-    }
+    await intentRef.set({ status: "aprovado", ...pagamentoData }, { merge: true });
 
     return res.status(200).json({ ok: true, processed: true, approved: true });
   } catch (e) {
     console.error("cielo-webhook error:", e);
-    // Mesmo em erro, devolvemos 200 para não gerar re-tentativas agressivas da Cielo
+    // Mantém 200 para não gerar retentativas agressivas
     return res.status(200).json({ ok: false, error: e?.message || String(e) });
   }
 }
