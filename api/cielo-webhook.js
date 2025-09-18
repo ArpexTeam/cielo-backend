@@ -221,6 +221,13 @@ export default async function handler(req, res) {
     const intentRef = intentsSnap.empty ? null : intentsSnap.docs[0].ref;
     const intentData = intentsSnap.empty ? {} : intentsSnap.docs[0].data();
 
+    // Dados do cliente/agendamento vindos do intent (se houver)
+    const nome        = intentData?.cliente?.nome ?? intentData?.nome ?? "";
+    const telefone    = intentData?.cliente?.telefone ?? intentData?.telefone ?? "";
+    const observacoes = intentData?.cliente?.observacoes ?? intentData?.observacoes ?? "";
+    const agendamento = intentData?.agendamento ?? null;
+    const tipoServico = intentData?.tipoServico ?? (agendamento ? "Agendamento" : "Online");
+
     if (intentRef) {
       await intentRef.set({
         lastNotification: FieldValue.serverTimestamp(),
@@ -234,19 +241,21 @@ export default async function handler(req, res) {
 
     const ps = norm.ps;
 
+    // 1) Pendente / Autorizado
     if (ps === 1) {
       if (intentRef) await intentRef.set({ status: "pendente" }, { merge: true });
       await logToFirestore({ ...baseLog, stage: "pending-authorized" });
       return res.status(200).json({ ok: true, processed: true, approved: false, pending: true });
     }
 
+    // 2) Não aprovado
     if (ps === 3 || ps === 4 || ps === 5) {
       if (intentRef) await intentRef.set({ status: "nao_aprovado" }, { merge: true });
       await logToFirestore({ ...baseLog, stage: "not-approved" });
       return res.status(200).json({ ok: true, processed: true, approved: false });
     }
 
-    // ====== APROVADO (ps=2) ======
+    // 3) Aprovado (ps=2)
     if (ps === 2 || norm.isPaid) {
       const origItens = Array.isArray(intentData?.itens) ? intentData.itens : [];
       const itens = mapItensToPedido(origItens);
@@ -254,8 +263,6 @@ export default async function handler(req, res) {
       const itensCount = countItens(itens);
 
       const orderNumStr = String(orderNumber);
-      const clienteNome = intentData?.nome || intentData?.clienteNome || "";
-      const clienteTelefone = intentData?.telefone || intentData?.clienteTelefone || "";
 
       const pagamentoData = {
         provedor: "online",
@@ -270,18 +277,21 @@ export default async function handler(req, res) {
       const basePedido = {
         orderNumber: orderNumStr,
         dateKeySP: dateKeySP(),
-        tipoServico: intentData?.tipoServico || "Online",
+        tipoServico,
         status: "aprovado",
         total,
         itens,
         itensCount,
-        nome: clienteNome,
-        telefone: clienteTelefone,
+        // dados do cliente/agendamento:
+        nome,
+        telefone,
+        observacoes,
+        ...(agendamento ? { agendamento } : {}),
         pagamento: pagamentoData,
         updatedAt: FieldValue.serverTimestamp(),
       };
 
-      // ⚠️ Procura por mesmo orderNumber, MAS só considera se for de HOJE.
+      // Só considera docs de HOJE com o mesmo orderNumber
       const possiveis = await db
         .collection("pedidos")
         .where("pagamento.orderNumber", "==", orderNumStr)
@@ -296,7 +306,7 @@ export default async function handler(req, res) {
       if (!docHoje) {
         await db.collection("pedidos").add({
           ...basePedido,
-          createdAt: FieldValue.serverTimestamp(), // entra no filtro da sua tela
+          createdAt: FieldValue.serverTimestamp(),
         });
         await logToFirestore({ ...baseLog, stage: "pedido-created", wrote: { orderNumber: orderNumStr } });
         jlog({ tag: "webhook", stage: "pedido-created", orderNumber: orderNumStr, tookMs: Date.now() - t0 });
@@ -317,6 +327,7 @@ export default async function handler(req, res) {
       return res.status(200).json({ ok: true, processed: true, approved: true });
     }
 
+    // 4) Desconhecido
     await logToFirestore({ ...baseLog, stage: "unknown-status" });
     jlog({ tag: "webhook", stage: "unknown-status", orderNumber, norm, tookMs: Date.now() - t0 });
     return res.status(200).json({ ok: true, processed: false, approved: false });
@@ -328,6 +339,7 @@ export default async function handler(req, res) {
       stage: "exception",
       error: e?.message || String(e),
     });
+    // 200 para evitar retentativas agressivas
     return res.status(200).json({ ok: false, error: e?.message || String(e) });
   }
 }
