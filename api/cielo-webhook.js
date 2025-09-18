@@ -1,13 +1,12 @@
 // api/cielo-webhook.js
-// Trata body como JSON **ou** form-encoded (string) e **não** devolve 400 se faltar OrderNumber.
-// Usa Firebase Admin modular (v11+).
-
+import { parse as parseQS } from "querystring";
 import { initializeApp, cert, applicationDefault, getApps } from "firebase-admin/app";
 import { getFirestore, FieldValue } from "firebase-admin/firestore";
 
-/* -------------------- Firebase Admin init -------------------- */
-(function initAdmin() {
+/* ---------------- Firebase Admin (v11 modular) ---------------- */
+function initAdmin() {
   if (getApps().length) return;
+
   const hasSA =
     process.env.FIREBASE_PROJECT_ID &&
     process.env.FIREBASE_CLIENT_EMAIL &&
@@ -25,112 +24,96 @@ import { getFirestore, FieldValue } from "firebase-admin/firestore";
   } else {
     initializeApp({ credential: applicationDefault() });
   }
-})();
+}
+initAdmin();
+
 const db = getFirestore();
 
-/* -------------------- Utils -------------------- */
-function safeJsonParse(txt) {
-  try {
-    return JSON.parse(txt);
-  } catch {
-    return null;
-  }
+/* ---------------- Helpers ---------------- */
+async function readRawBody(req) {
+  return await new Promise((resolve, reject) => {
+    let data = "";
+    req.on("data", (c) => (data += c));
+    req.on("end", () => resolve(data));
+    req.on("error", reject);
+  });
 }
 
-function parseBody(req) {
-  const b = req.body;
-  if (!b) return {};
+async function parseBody(req) {
+  // Tente usar req.body (Vercel já parseia JSON/URL-encoded na maioria dos casos)
+  let b = req.body;
 
-  // Se já veio objeto (application/json), retorna direto
-  if (typeof b === "object") return b;
-
-  // String -> tenta JSON, senão form-encoded
-  if (typeof b === "string") {
-    const s = b.trim();
-    if (!s) return {};
-
-    const asJson = safeJsonParse(s);
-    if (asJson && typeof asJson === "object") return asJson;
-
-    // Tenta application/x-www-form-urlencoded
+  // Se vier vazio/indefinido, leia o raw e tente parsear
+  if (b == null || b === "") {
+    const raw = await readRawBody(req);
+    if (!raw) return {};
     try {
-      const params = new URLSearchParams(s);
-      const obj = {};
-      for (const [k, v] of params) obj[k] = v;
-
-      // Alguns gateways mandam campos-JSON como string
-      ["Payment", "payment", "payload", "data"].forEach((k) => {
-        const val = obj[k];
-        if (typeof val === "string" && (val.startsWith("{") || val.startsWith("["))) {
-          const j = safeJsonParse(val);
-          if (j) obj[k] = j;
-        }
-      });
-
-      return obj;
-    } catch {
-      // Deixa como vazio mas mantém raw para log
-      return { _raw: s };
+      return JSON.parse(raw);
+    } catch (_) {
+      // tenta form-encoded
+      return parseQS(raw);
     }
   }
 
-  return {};
+  // Se for string, tente JSON e depois form-encoded
+  if (typeof b === "string") {
+    try {
+      return JSON.parse(b);
+    } catch (_) {
+      return parseQS(b);
+    }
+  }
+
+  // Já é objeto
+  return b;
 }
 
-function extractOrderNumber(payload) {
-  const v =
+function getOrderNumber(payload) {
+  // Cobre variações mais comuns que já vimos no painel e no webhook
+  const cand =
+    payload?.order_number ??
     payload?.OrderNumber ??
     payload?.orderNumber ??
     payload?.OrderNumberId ??
-    payload?.order_number ??
-    payload?.reference ??
-    payload?.MerchantOrderId ??
-    payload?.merchantOrderId ??
+    payload?.orderNumberId ??
+    payload?.order?.number ??
     "";
-  return String(v || "").trim();
+
+  return String(cand || "").trim();
 }
 
 function isPaidStatus(payload) {
+  // às vezes vem string textual
   const s = String(payload?.Status ?? payload?.status ?? "").toLowerCase();
-  if (s.includes("paid") || s.includes("aprov")) return true;
+  if (/(paid|aprov|confirm|captur|authorized|autorizado)/i.test(s)) return true;
 
-  const ps = Number(payload?.Payment?.Status ?? payload?.payment?.status ?? -1);
-  // 2=Autorizado, 3=Pago (ajuste se sua conta usar outros códigos)
-  return [2, 3].includes(ps);
+  // Checkout Cielo costuma mandar "payment_status" = "1" (string)
+  const ps = Number(
+    payload?.payment_status ??
+      payload?.PaymentStatus ??
+      payload?.Payment?.Status ??
+      payload?.payment?.status ??
+      -1
+  );
+
+  // Considere 1/2/3 como estados positivos (ajuste se necessário para sua conta)
+  return [1, 2, 3].includes(ps);
 }
 
-async function logWebhook(entry) {
-  try {
-    await db.collection("webhookLogs").add({
-      ...entry,
-      createdAt: FieldValue.serverTimestamp(),
-    });
-  } catch (e) {
-    console.error("logWebhook error:", e?.message || e);
-  }
-}
-
-/* -------------------- Handler -------------------- */
+/* ---------------- Handler ---------------- */
 export default async function handler(req, res) {
   if (req.method !== "POST") {
-    return res.status(405).json({ ok: false, error: "Method not allowed" });
+    // Webhook é server-to-server; 405 não ajuda a Cielo.
+    return res.status(200).json({ ok: true, ignored: true, reason: "not-post" });
   }
 
   try {
-    const payload = parseBody(req);
-    const orderNumber = extractOrderNumber(payload);
+    const payload = await parseBody(req);
+    const orderNumber = getOrderNumber(payload);
 
     if (!orderNumber) {
-      // Não quebra o fluxo da Cielo: loga e retorna 200
-      await logWebhook({
-        note: "missing-order-number",
-        headers: {
-          "content-type": req.headers["content-type"] || "",
-          "user-agent": req.headers["user-agent"] || "",
-        },
-        payload,
-      });
-      return res.status(200).json({ ok: true, received: true, missingOrderNumber: true });
+      console.warn("[webhook] Sem orderNumber no payload. Ignorando.", payload);
+      return res.status(200).json({ ok: true, ignored: true, reason: "no-order-number" });
     }
 
     // Busca o intent deste pedido
@@ -143,7 +126,6 @@ export default async function handler(req, res) {
     const intentRef = intentsSnap.empty ? null : intentsSnap.docs[0].ref;
     const intentData = intentsSnap.empty ? {} : intentsSnap.docs[0].data();
 
-    // Não aprovado -> marca intent como não aprovado e encerra com 200
     if (!isPaidStatus(payload)) {
       if (intentRef) {
         await intentRef.set(
@@ -155,11 +137,11 @@ export default async function handler(req, res) {
           { merge: true }
         );
       }
-      await logWebhook({ note: "status-nao-aprovado", orderNumber, payload });
-      return res.status(200).json({ ok: true, message: "Notificado (nao_aprovado)" });
+      console.log(`[webhook] Pedido ${orderNumber} NÃO aprovado.`);
+      return res.status(200).json({ ok: true, processed: true, approved: false });
     }
 
-    // Aprovado -> cria/atualiza em "pedidos"
+    // Aprovado → cria/atualiza "pedidos"
     const itens = Array.isArray(intentData?.itens) ? intentData.itens : [];
     const total = Number(intentData?.total ?? 0);
 
@@ -185,25 +167,26 @@ export default async function handler(req, res) {
         tipoServico: "Online",
         pagamento: pagamentoData,
       });
+      console.log(`[webhook] Criado pedido aprovado para ${orderNumber}.`);
     } else {
       await pedidosSnap.docs[0].ref.set(
         { status: "aprovado", pagamento: pagamentoData },
         { merge: true }
       );
+      console.log(`[webhook] Atualizado pedido aprovado para ${orderNumber}.`);
     }
 
     if (intentRef) {
       await intentRef.set(
-        { status: "aprovado", lastNotification: FieldValue.serverTimestamp() },
+        { status: "aprovado", lastNotification: FieldValue.serverTimestamp(), raw: payload },
         { merge: true }
       );
     }
 
-    await logWebhook({ note: "status-aprovado", orderNumber, ok: true });
-    return res.status(200).json({ ok: true });
+    return res.status(200).json({ ok: true, processed: true, approved: true });
   } catch (e) {
     console.error("cielo-webhook error:", e);
-    await logWebhook({ note: "exception", error: e?.message || String(e) });
-    return res.status(500).json({ ok: false, error: e?.message || String(e) });
+    // Mesmo em erro, devolvemos 200 para não gerar re-tentativas agressivas da Cielo
+    return res.status(200).json({ ok: false, error: e?.message || String(e) });
   }
 }
