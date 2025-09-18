@@ -137,7 +137,7 @@ export default async function handler(req, res) {
           { merge: true }
         );
       }
-      console.log(`[webhook] Pedido ${orderNumber} não aprovado (status != 2).`);
+      console.log(`[webhook] Pedido ${orderNumber} não aprovado (status != 2). ${payload}`);
       return res.status(200).json({ ok: true, processed: true, approved: false });
     }
 
