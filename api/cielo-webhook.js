@@ -13,7 +13,13 @@ function initAdmin() {
     process.env.FIREBASE_PRIVATE_KEY;
 
   if (hasSA) {
-    const privateKey = process.env.FIREBASE_PRIVATE_KEY.replace(/\\n/g, "\n");
+    // trata caso a chave tenha vindo com aspas e com "\n"
+    let privateKey = process.env.FIREBASE_PRIVATE_KEY;
+    if (privateKey.startsWith('"') && privateKey.endsWith('"')) {
+      privateKey = privateKey.slice(1, -1);
+    }
+    privateKey = privateKey.replace(/\\n/g, "\n");
+
     initializeApp({
       credential: cert({
         projectId: process.env.FIREBASE_PROJECT_ID,
@@ -32,8 +38,13 @@ const db = getFirestore();
 /* ---------------- Utils ---------------- */
 const pickHeaders = (h = {}) => {
   const allow = [
-    "content-type", "content-length", "user-agent",
-    "x-forwarded-for", "x-real-ip", "x-vercel-id", "x-request-id",
+    "content-type",
+    "content-length",
+    "user-agent",
+    "x-forwarded-for",
+    "x-real-ip",
+    "x-vercel-id",
+    "x-request-id",
   ];
   const out = {};
   for (const k of allow) if (h[k]) out[k] = h[k];
@@ -112,14 +123,30 @@ function normalizePayment(p) {
 
   if (Number.isFinite(ps)) {
     // Checkout Cielo: 1=pendente, 2=pago, 3=negado, 4=expirado, 5=cancelado
-    if (ps === 2) { isPaid = true; reason = "pago"; }
-    else if (ps === 1) { isPaid = false; reason = "pendente"; }
-    else if (ps === 3) { isPaid = false; reason = "negado"; }
-    else if (ps === 4) { isPaid = false; reason = "expirado"; }
-    else if (ps === 5) { isPaid = false; reason = "cancelado"; }
+    if (ps === 2) {
+      isPaid = true;
+      reason = "pago";
+    } else if (ps === 1) {
+      isPaid = false;
+      reason = "pendente";
+    } else if (ps === 3) {
+      isPaid = false;
+      reason = "negado";
+    } else if (ps === 4) {
+      isPaid = false;
+      reason = "expirado";
+    } else if (ps === 5) {
+      isPaid = false;
+      reason = "cancelado";
+    }
   } else {
-    if (textPaid) { isPaid = true; reason = `text:${t}`; }
-    else if (textAuth) { isPaid = false; reason = `text:${t}`; }
+    if (textPaid) {
+      isPaid = true;
+      reason = `text:${t}`;
+    } else if (textAuth) {
+      isPaid = false;
+      reason = `text:${t}`;
+    }
   }
 
   return { ps: Number.isFinite(ps) ? ps : null, text: t, isPaid, reason };
@@ -139,7 +166,8 @@ function mapItensToPedido(itens) {
   return (Array.isArray(itens) ? itens : []).map((it) => {
     const precoNum = Number(it?.precoSelecionado ?? it?.preco ?? it?.Price ?? it?.price ?? 0);
     const unitPriceCents = Number(it?.UnitPrice ?? 0);
-    const preco = precoNum > 0 ? precoNum : (unitPriceCents > 0 ? Math.round(unitPriceCents) / 100 : 0);
+    const preco =
+      precoNum > 0 ? precoNum : unitPriceCents > 0 ? Math.round(unitPriceCents) / 100 : 0;
 
     return {
       id: String(it?.id ?? it?.Id ?? it?.Sku ?? it?.sku ?? ""),
@@ -172,6 +200,42 @@ function isDocFromToday(docSnap) {
   return createdKey === todayKey;
 }
 
+// tenta localizar o intent de forma robusta
+async function findIntentByOrderNumber(orderNumber) {
+  const orderKey = String(orderNumber || "").trim();
+  if (!orderKey) return { ref: null, data: null, from: "empty" };
+
+  // 1) tentativa rápida: igualdade exata (string)
+  let snap = await db
+    .collection("checkoutIntents")
+    .where("orderNumber", "==", orderKey)
+    .limit(1)
+    .get();
+
+  if (!snap.empty) {
+    return { ref: snap.docs[0].ref, data: snap.docs[0].data(), from: "where" };
+  }
+
+  // 2) fallback: varrer últimos intents e comparar normalizando
+  snap = await db
+    .collection("checkoutIntents")
+    .orderBy("createdAt", "desc")
+    .limit(30)
+    .get();
+
+  let found = null;
+  snap.forEach((d) => {
+    if (found) return;
+    const data = d.data() || {};
+    const on = String(data.orderNumber ?? "").trim();
+    if (on === orderKey) {
+      found = { ref: d.ref, data, from: "fallback-scan" };
+    }
+  });
+
+  return found || { ref: null, data: null, from: "not-found" };
+}
+
 /* ---------------- Handler ---------------- */
 export default async function handler(req, res) {
   const t0 = Date.now();
@@ -185,8 +249,15 @@ export default async function handler(req, res) {
 
   try {
     const { parsed, raw, contentType } = await parseBody(req);
-    const orderNumber = getOrderNumber(parsed);
+    const orderNumberRaw = getOrderNumber(parsed);
+    const orderNumber = String(orderNumberRaw || "").trim();
     const norm = normalizePayment(parsed);
+
+    // tenta achar o intent
+    const intentInfo = await findIntentByOrderNumber(orderNumber);
+    const intentRef = intentInfo?.ref || null;
+    const intentData = intentInfo?.data || {};
+    const intentSource = intentInfo?.from || "none";
 
     const baseLog = {
       at: FieldValue.serverTimestamp(),
@@ -196,6 +267,8 @@ export default async function handler(req, res) {
       contentType,
       headers,
       orderNumber,
+      intentSource,
+      intentFound: !!intentRef,
       paymentStatusNumeric: norm.ps,
       paymentStatusText: norm.text || null,
       isPaid: !!norm.isPaid,
@@ -205,38 +278,32 @@ export default async function handler(req, res) {
     };
 
     await logToFirestore({ ...baseLog, stage: "received" });
-    jlog({ tag: "webhook", stage: "received", orderNumber, norm, vercelId });
+    jlog({ tag: "webhook", stage: "received", orderNumber, norm, intentSource, vercelId });
 
     if (!orderNumber) {
       await logToFirestore({ ...baseLog, stage: "no-order-number" });
       return res.status(200).json({ ok: true, ignored: true, reason: "no-order-number" });
     }
 
-    // Intent do pedido
-    const intentsSnap = await db
-      .collection("checkoutIntents")
-      .where("orderNumber", "==", orderNumber)
-      .limit(1)
-      .get();
-    const intentRef = intentsSnap.empty ? null : intentsSnap.docs[0].ref;
-    const intentData = intentsSnap.empty ? {} : intentsSnap.docs[0].data();
-
     // Dados do cliente/agendamento vindos do intent (se houver)
-    const nome        = intentData?.cliente?.nome ?? intentData?.nome ?? "";
-    const telefone    = intentData?.cliente?.telefone ?? intentData?.telefone ?? "";
+    const nome = intentData?.cliente?.nome ?? intentData?.nome ?? "";
+    const telefone = intentData?.cliente?.telefone ?? intentData?.telefone ?? "";
     const observacoes = intentData?.cliente?.observacoes ?? intentData?.observacoes ?? "";
     const agendamento = intentData?.agendamento ?? null;
     const tipoServico = intentData?.tipoServico ?? (agendamento ? "Agendamento" : "Online");
 
     if (intentRef) {
-      await intentRef.set({
-        lastNotification: FieldValue.serverTimestamp(),
-        lastPayload: {
-          paymentStatusNumeric: norm.ps,
-          paymentStatusText: norm.text,
-          raw: parsed,
+      await intentRef.set(
+        {
+          lastNotification: FieldValue.serverTimestamp(),
+          lastPayload: {
+            paymentStatusNumeric: norm.ps,
+            paymentStatusText: norm.text,
+            raw: parsed,
+          },
         },
-      }, { merge: true });
+        { merge: true }
+      );
     }
 
     const ps = norm.ps;
@@ -245,7 +312,9 @@ export default async function handler(req, res) {
     if (ps === 1) {
       if (intentRef) await intentRef.set({ status: "pendente" }, { merge: true });
       await logToFirestore({ ...baseLog, stage: "pending-authorized" });
-      return res.status(200).json({ ok: true, processed: true, approved: false, pending: true });
+      return res
+        .status(200)
+        .json({ ok: true, processed: true, approved: false, pending: true });
     }
 
     // 2) Não aprovado
@@ -308,8 +377,18 @@ export default async function handler(req, res) {
           ...basePedido,
           createdAt: FieldValue.serverTimestamp(),
         });
-        await logToFirestore({ ...baseLog, stage: "pedido-created", wrote: { orderNumber: orderNumStr } });
-        jlog({ tag: "webhook", stage: "pedido-created", orderNumber: orderNumStr, tookMs: Date.now() - t0 });
+        await logToFirestore({
+          ...baseLog,
+          stage: "pedido-created",
+          wrote: { orderNumber: orderNumStr },
+        });
+        jlog({
+          tag: "webhook",
+          stage: "pedido-created",
+          orderNumber: orderNumStr,
+          intentSource,
+          tookMs: Date.now() - t0,
+        });
       } else {
         await docHoje.ref.set(
           {
@@ -318,8 +397,18 @@ export default async function handler(req, res) {
           },
           { merge: true }
         );
-        await logToFirestore({ ...baseLog, stage: "pedido-updated", wrote: { orderNumber: orderNumStr, docId: docHoje.id } });
-        jlog({ tag: "webhook", stage: "pedido-updated", orderNumber: orderNumStr, tookMs: Date.now() - t0 });
+        await logToFirestore({
+          ...baseLog,
+          stage: "pedido-updated",
+          wrote: { orderNumber: orderNumStr, docId: docHoje.id },
+        });
+        jlog({
+          tag: "webhook",
+          stage: "pedido-updated",
+          orderNumber: orderNumStr,
+          intentSource,
+          tookMs: Date.now() - t0,
+        });
       }
 
       if (intentRef) await intentRef.set({ status: "aprovado" }, { merge: true });
@@ -329,7 +418,14 @@ export default async function handler(req, res) {
 
     // 4) Desconhecido
     await logToFirestore({ ...baseLog, stage: "unknown-status" });
-    jlog({ tag: "webhook", stage: "unknown-status", orderNumber, norm, tookMs: Date.now() - t0 });
+    jlog({
+      tag: "webhook",
+      stage: "unknown-status",
+      orderNumber,
+      intentSource,
+      norm,
+      tookMs: Date.now() - t0,
+    });
     return res.status(200).json({ ok: true, processed: false, approved: false });
   } catch (e) {
     jlog({ tag: "webhook", stage: "exception", err: e?.message || String(e) });
