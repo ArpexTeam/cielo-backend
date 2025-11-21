@@ -35,6 +35,14 @@ initAdmin();
 
 const db = getFirestore();
 
+console.log(
+  JSON.stringify({
+    tag: "firebase-init",
+    projectId: db.app.options.projectId || null,
+    clientEmail: process.env.FIREBASE_CLIENT_EMAIL || null,
+  })
+);
+
 /* ---------------- Utils ---------------- */
 const pickHeaders = (h = {}) => {
   const allow = [
