@@ -35,13 +35,19 @@ initAdmin();
 
 const db = getFirestore();
 
+// ✅ NOVO LOG DE DEBUG
+const apps = getApps();
+const app = apps.length ? apps[0] : null;
+
 console.log(
   JSON.stringify({
     tag: "firebase-init",
-    projectId: db.app.options.projectId || null,
+    projectId: app?.options?.projectId || null,
     clientEmail: process.env.FIREBASE_CLIENT_EMAIL || null,
   })
 );
+
+
 
 /* ---------------- Utils ---------------- */
 const pickHeaders = (h = {}) => {
